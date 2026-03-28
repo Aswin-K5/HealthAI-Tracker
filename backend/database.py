@@ -9,6 +9,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Load Streamlit Cloud secrets into environment
+try:
+    import streamlit as st
+    if hasattr(st, "secrets"):
+        for key in ["DATABASE_URL", "GROQ_API_KEY", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]:
+            if key in st.secrets and not os.environ.get(key):
+                os.environ[key] = str(st.secrets[key])
+except Exception:
+    pass
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 def get_connection():
@@ -21,7 +31,7 @@ def get_connection():
             database = os.getenv("DB_NAME", "postgres"),
             user     = os.getenv("DB_USER", "postgres"),
             password = os.getenv("DB_PASSWORD", ""),
-            sslmode  = "require"   # Supabase requires SSL
+            sslmode  = "require"
         )
 
 
