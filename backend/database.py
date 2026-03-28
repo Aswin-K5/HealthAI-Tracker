@@ -13,7 +13,9 @@ load_dotenv()
 try:
     import streamlit as st
     if hasattr(st, "secrets"):
-        for key in ["DATABASE_URL", "GROQ_API_KEY", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]:
+        for key in ["DATABASE_URL", "GROQ_API_KEY",
+                    "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD",
+                    "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS"]:
             if key in st.secrets and not os.environ.get(key):
                 os.environ[key] = str(st.secrets[key])
 except Exception:
