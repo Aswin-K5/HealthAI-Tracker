@@ -25,7 +25,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 def get_connection():
     if DATABASE_URL:
-        return psycopg2.connect(DATABASE_URL, sslmode="require")
+        return psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=10)
     else:
         return psycopg2.connect(
             host     = os.getenv("DB_HOST", "localhost"),
@@ -33,9 +33,9 @@ def get_connection():
             database = os.getenv("DB_NAME", "postgres"),
             user     = os.getenv("DB_USER", "postgres"),
             password = os.getenv("DB_PASSWORD", ""),
-            sslmode  = "require"
+            sslmode  = "require",
+            connect_timeout = 10
         )
-
 
 @contextmanager
 def get_db():
