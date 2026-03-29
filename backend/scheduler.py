@@ -57,19 +57,16 @@ def _mark_sent(cache_key: str):
 
 
 def check_medication_reminders():
-    """
-    Called every 5 minutes by GitHub Actions.
-    Checks a 7-minute window to catch any reminder within the 5-min cron gap.
-    """
     _ensure_sent_log_table()
     from backend.database import execute_query
     from backend.email_service import send_medication_reminder
 
     now          = datetime.now()
-    window_start = (now + timedelta(minutes=4)).strftime("%H:%M")
-    window_end   = (now + timedelta(minutes=11)).strftime("%H:%M")
+    # 2 hour window to match cron interval
+    window_start = now.strftime("%H:%M")
+    window_end   = (now + timedelta(hours=2)).strftime("%H:%M")
 
-    print(f"[Scheduler] 💊 Checking medications | window {window_start} → {window_end}")
+    print(f"[Reminders] 💊 Medication window: {window_start} → {window_end}")
 
     try:
         rows = execute_query("""
@@ -77,33 +74,28 @@ def check_medication_reminders():
                    m.reminder_times, p.name, p.email
             FROM medications m
             JOIN patients p ON p.id = m.patient_id
-            WHERE m.is_active  = TRUE
+            WHERE m.is_active = TRUE
               AND m.reminder_times IS NOT NULL
-              AND m.end_date  >= CURRENT_DATE
+              AND m.end_date >= CURRENT_DATE
         """, ())
-
-        if not rows:
-            print("[Scheduler] No active medications found.")
-            return
 
         for row in rows:
             try:
                 times = json.loads(row["reminder_times"]) if row["reminder_times"] else []
-            except Exception:
+            except:
                 continue
 
             for t in times:
-                # Handle both "HH:MM" and "HH:MM:SS"
                 t_short = t[:5]
                 if not (window_start <= t_short <= window_end):
                     continue
 
                 cache_key = f"med_{row['id']}_{now.strftime('%Y-%m-%d')}_{t_short}"
                 if _already_sent(cache_key):
-                    print(f"[Scheduler] Already sent {cache_key}, skipping.")
+                    print(f"[Reminders] Already sent {cache_key}, skipping.")
                     continue
 
-                print(f"[Scheduler] 💊 Sending → {row['email']} | {row['medication_name']} at {t_short}")
+                print(f"[Reminders] 💊 Sending → {row['email']} | {row['medication_name']} at {t_short}")
                 ok = send_medication_reminder(
                     to_email       = row["email"],
                     patient_name   = row["name"],
@@ -116,7 +108,7 @@ def check_medication_reminders():
                     _mark_sent(cache_key)
 
     except Exception as e:
-        print(f"[Scheduler] Medication check error: {e}")
+        print(f"[Reminders] Medication error: {e}")
 
 
 def check_appointment_reminders():
