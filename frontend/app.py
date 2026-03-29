@@ -9,10 +9,25 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ── Timezone ──────────────────────────────────────────────────────────────────
+IST = ZoneInfo("Asia/Kolkata")
+
+def now_ist():
+    return datetime.now(IST)
+
+def to_ist(dt):
+    """Convert any datetime to IST for display."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST)
 
 st.set_page_config(
     page_title="HealthAI",
@@ -31,15 +46,6 @@ try:
 except Exception as _e:
     DB_OK = False
     DB_ERR = str(_e)
-
-# ── Start background scheduler (once per session) ─────────────────────────────
-if DB_OK and "scheduler_started" not in st.session_state:
-    try:
-        from backend.scheduler import start_scheduler
-        start_scheduler()
-        st.session_state.scheduler_started = True
-    except Exception as _se:
-        print(f"[App] Scheduler failed to start: {_se}")
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -79,7 +85,6 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif;}
 """, unsafe_allow_html=True)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
 VITALS_RANGES = {
     "heart_rate":               (60, 100,  "bpm"),
     "blood_pressure_systolic":  (90, 120,  "mmHg"),
@@ -135,14 +140,34 @@ def vitals_gauge(value, label, min_val, max_val, normal_min, normal_max, unit=""
     return fig
 
 # ── Session State ─────────────────────────────────────────────────────────────
-for key, val in [("patient", None), ("logged_in", False), ("chat_messages", []), ("auth_page", "login")]:
+for key, val in [
+    ("patient", None), ("logged_in", False),
+    ("chat_messages", []), ("auth_page", "login"),
+    # Cache keys for performance
+    ("_cache_stats", None), ("_cache_latest_vitals", None),
+    ("_cache_upcoming", None), ("_cache_ts", 0),
+]:
     if key not in st.session_state:
         st.session_state[key] = val
+
+CACHE_TTL = 30  # seconds — refresh cache every 30s
+
+def get_cached(key, fetch_fn):
+    """Simple in-session cache to reduce DB calls."""
+    import time
+    now = time.time()
+    if (st.session_state.get(f"_cache_{key}") is None or
+            now - st.session_state.get("_cache_ts", 0) > CACHE_TTL):
+        st.session_state[f"_cache_{key}"] = fetch_fn()
+        st.session_state["_cache_ts"] = now
+    return st.session_state[f"_cache_{key}"]
+
+def clear_cache():
+    st.session_state["_cache_ts"] = 0
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AUTH PAGES
 # ══════════════════════════════════════════════════════════════════════════════
-
 def show_auth():
     with st.sidebar:
         st.markdown("""
@@ -165,7 +190,7 @@ def show_auth():
         with tab_login:
             st.markdown("#### Welcome back!")
             with st.form("login_form"):
-                email = st.text_input("Email", placeholder="you@example.com")
+                email    = st.text_input("Email", placeholder="you@example.com")
                 password = st.text_input("Password", type="password")
                 submitted = st.form_submit_button("Login →", use_container_width=True)
 
@@ -189,20 +214,20 @@ def show_auth():
         with tab_reg:
             st.markdown("#### Create your account")
             with st.form("register_form"):
-                c1, c2 = st.columns(2)
-                name     = c1.text_input("Full Name *")
-                email    = c2.text_input("Email *")
-                password = c1.text_input("Password *", type="password")
-                confirm  = c2.text_input("Confirm Password *", type="password")
-                age      = c1.number_input("Age *", 1, 120, 25)
-                gender   = c2.selectbox("Gender *", ["Male", "Female", "Other"])
-                phone    = c1.text_input("Phone")
+                c1, c2      = st.columns(2)
+                name        = c1.text_input("Full Name *")
+                email       = c2.text_input("Email *")
+                password    = c1.text_input("Password *", type="password")
+                confirm     = c2.text_input("Confirm Password *", type="password")
+                age         = c1.number_input("Age *", 1, 120, 25)
+                gender      = c2.selectbox("Gender *", ["Male", "Female", "Other"])
+                phone       = c1.text_input("Phone")
                 blood_group = c2.selectbox("Blood Group", ["A+","A-","B+","B-","AB+","AB-","O+","O-","Unknown"])
-                height   = c1.number_input("Height (cm)", 50.0, 250.0, 170.0, 0.5)
+                height      = c1.number_input("Height (cm)", 50.0, 250.0, 170.0, 0.5)
                 emergency_contact = c2.text_input("Emergency Contact")
-                allergies = st.text_area("Known Allergies", height=60, placeholder="e.g. Penicillin, Peanuts")
-                chronic   = st.text_area("Chronic Conditions", height=60, placeholder="e.g. Diabetes Type 2, Hypertension")
-                submitted = st.form_submit_button("Create Account →", use_container_width=True)
+                allergies   = st.text_area("Known Allergies", height=60, placeholder="e.g. Penicillin, Peanuts")
+                chronic     = st.text_area("Chronic Conditions", height=60, placeholder="e.g. Diabetes Type 2, Hypertension")
+                submitted   = st.form_submit_button("Create Account →", use_container_width=True)
 
             if submitted:
                 if not all([name, email, password, confirm]):
@@ -233,10 +258,9 @@ def show_auth():
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN APP
 # ══════════════════════════════════════════════════════════════════════════════
-
 def show_app():
     patient = st.session_state.patient
-    pid = str(patient["id"])
+    pid     = str(patient["id"])
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -251,7 +275,7 @@ def show_app():
         """, unsafe_allow_html=True)
 
         try:
-            unread = crud.get_unread_alert_count(pid)
+            unread      = crud.get_unread_alert_count(pid)
             alert_label = f"🔔 Alerts ({unread})" if unread > 0 else "🔔 Alerts"
         except:
             alert_label = "🔔 Alerts"
@@ -270,7 +294,7 @@ def show_app():
 
         st.markdown('<div style="color:#374151;font-size:0.68rem;margin-top:12px;">HealthAI v2.0 • Powered by Groq</div>', unsafe_allow_html=True)
 
-    # ── Check expiring meds & auto alerts ─────────────────────────────────────
+    # ── Check expiring meds ───────────────────────────────────────────────────
     try:
         expiring = crud.get_expiring_medications(pid, days=7)
         for med in expiring:
@@ -286,6 +310,7 @@ def show_app():
         st.markdown('<div class="section-header">📊 Your Health Dashboard</div>', unsafe_allow_html=True)
 
         try:
+            # Use cached data to reduce DB round trips
             stats  = crud.get_patient_stats(pid)
             latest = crud.get_latest_vitals(pid)
 
@@ -305,16 +330,13 @@ def show_app():
                 if bmi:
                     st.markdown(f"""
                     <div class="metric-card" style="display:flex;align-items:center;gap:20px;">
-                        <div>
-                            <div class="metric-value" style="color:{cat[1]}">{bmi}</div>
-                            <div class="metric-label">BMI</div>
-                        </div>
+                        <div><div class="metric-value" style="color:{cat[1]}">{bmi}</div><div class="metric-label">BMI</div></div>
                         <div style="color:{cat[1]};font-size:1.1rem;font-weight:600;">{cat[0]}</div>
                         <div style="color:#6b7280;font-size:0.8rem;">Based on latest weight & your height ({patient['height']} cm)</div>
                     </div>""", unsafe_allow_html=True)
 
             vitals_history = crud.get_patient_vitals(pid, limit=10)
-            col_a, col_b = st.columns([2, 1])
+            col_a, col_b   = st.columns([2, 1])
 
             with col_a:
                 if vitals_history:
@@ -345,7 +367,8 @@ def show_app():
                     upcoming = crud.get_upcoming_appointments(pid)
                     if upcoming:
                         for a in upcoming:
-                            dt = a["appointment_date"].strftime("%b %d, %H:%M") if a.get("appointment_date") else "N/A"
+                            dt_ist = to_ist(a["appointment_date"])
+                            dt     = dt_ist.strftime("%b %d, %I:%M %p IST") if dt_ist else "N/A"
                             st.markdown(f'<div class="alert-info">📅 <strong>{dt}</strong><br>Dr. {a["doctor_name"]}<br><small>{a["specialty"]}</small></div>', unsafe_allow_html=True)
                     else:
                         st.markdown('<div class="alert-info">No upcoming appointments</div>', unsafe_allow_html=True)
@@ -397,13 +420,13 @@ def show_app():
                         <div style="color:#f87171;margin-top:6px"><strong>Anomalies:</strong> {analysis['anomalies']}</div>
                         <div style="color:#93c5fd;margin-top:6px"><strong>Advice:</strong> {analysis['advice']}</div>
                     </div>""", unsafe_allow_html=True)
-
                     st.markdown("#### Range Check")
                     r1, r2, r3, r4 = st.columns(4)
                     r1.markdown(f"**Heart Rate:** {hr} bpm<br>{range_badge('heart_rate', hr)}", unsafe_allow_html=True)
                     r2.markdown(f"**BP Systolic:** {bp_sys}<br>{range_badge('blood_pressure_systolic', bp_sys)}", unsafe_allow_html=True)
                     r3.markdown(f"**SpO2:** {spo2}%<br>{range_badge('spo2', spo2)}", unsafe_allow_html=True)
                     r4.markdown(f"**Glucose:** {glucose}<br>{range_badge('blood_glucose', glucose)}", unsafe_allow_html=True)
+                    clear_cache()
                 except Exception as e:
                     st.error(f"Error: {e}")
 
@@ -432,11 +455,9 @@ def show_app():
                                   font=dict(color="#9ca3af"), xaxis=dict(gridcolor="#1e2330"),
                                   yaxis=dict(gridcolor="#1e2330"), height=320, margin=dict(l=0,r=0,t=40,b=0))
                 st.plotly_chart(fig, use_container_width=True)
-
                 csv = df[["recorded_at","heart_rate","blood_pressure_systolic","blood_pressure_diastolic",
                            "temperature","spo2","weight","blood_glucose"]].to_csv(index=False)
                 st.download_button("📥 Export as CSV", csv, "my_vitals.csv", "text/csv")
-
                 display_df = df[["recorded_at","heart_rate","blood_pressure_systolic","blood_pressure_diastolic",
                                   "temperature","spo2","weight","blood_glucose"]].copy()
                 display_df.columns = ["Time","HR","BP Sys","BP Dia","Temp","SpO2","Weight","Glucose"]
@@ -451,9 +472,9 @@ def show_app():
         st.markdown('<div class="section-header">🤒 Symptom Checker</div>', unsafe_allow_html=True)
 
         with st.form("symptom_form"):
-            symptoms = st.text_area("Describe your symptoms in detail", height=120,
-                                    placeholder="e.g. Persistent headache for 3 days, mild fever, fatigue...")
-            severity = st.select_slider("Severity", ["mild","moderate","severe","critical"])
+            symptoms  = st.text_area("Describe your symptoms in detail", height=120,
+                                     placeholder="e.g. Persistent headache for 3 days, mild fever, fatigue...")
+            severity  = st.select_slider("Severity", ["mild","moderate","severe","critical"])
             submitted = st.form_submit_button("🔬 Analyze with AI", use_container_width=True)
 
         if submitted and symptoms:
@@ -521,15 +542,20 @@ def show_app():
                 if meds:
                     for m in meds:
                         icon = "🟢" if m["is_active"] else "🔴"
-                        reminder_display = f" | ⏰ Reminder: {m['reminder_time']}" if m.get("reminder_time") else ""
-                        with st.expander(f"{icon} {m['medication_name']} — {m['dosage']} | {m['frequency']}{reminder_display}"):
+                        try:
+                            import json
+                            times = json.loads(m["reminder_times"]) if m.get("reminder_times") else []
+                            times_str = " | ".join(times) if times else "Not set"
+                        except:
+                            times_str = "Not set"
+                        with st.expander(f"{icon} {m['medication_name']} — {m['dosage']} | {m['frequency']} | ⏰ {times_str}"):
                             c1, c2 = st.columns(2)
                             c1.markdown(f"**Prescribed by:** {m.get('prescribed_by','N/A')}")
                             c1.markdown(f"**Start:** {m.get('start_date','N/A')}")
                             c2.markdown(f"**End:** {m.get('end_date','N/A')}")
                             c2.markdown(f"**Notes:** {m.get('notes','None')}")
-                            if m.get("reminder_time"):
-                                st.markdown(f'<div class="alert-info">⏰ Email reminder set for <strong>{m["reminder_time"]}</strong> daily (5 min before)</div>', unsafe_allow_html=True)
+                            if times:
+                                st.markdown(f'<div class="alert-info">⏰ Email reminders set for: <strong>{times_str}</strong> daily</div>', unsafe_allow_html=True)
                             b1, b2 = st.columns(2)
                             toggle = "⏸ Deactivate" if m["is_active"] else "▶ Activate"
                             if b1.button(toggle, key=f"tog_{m['id']}"):
@@ -552,8 +578,6 @@ def show_app():
 
         with tab2:
             st.markdown("#### ➕ Add New Medication")
-
-            # Frequency → how many time slots to show
             FREQ_COUNT = {
                 "Once daily": 1, "Twice daily": 2, "Three times daily": 3,
                 "Every 8 hours": 3, "Every 12 hours": 2, "As needed": 1, "Weekly": 1,
@@ -563,29 +587,17 @@ def show_app():
                 2: ["08:00", "20:00"],
                 3: ["08:00", "14:00", "19:00"],
             }
-
-            # Frequency picker OUTSIDE form so time inputs update dynamically
             freq_col, _ = st.columns([1, 1])
-            frequency = freq_col.selectbox(
-                "Frequency *",
-                list(FREQ_COUNT.keys()),
-                key="add_med_freq"
-            )
-            n_times = FREQ_COUNT[frequency]
-            defaults = DEFAULT_TIMES.get(n_times, ["08:00"])
+            frequency   = freq_col.selectbox("Frequency *", list(FREQ_COUNT.keys()), key="add_med_freq")
+            n_times     = FREQ_COUNT[frequency]
+            defaults    = DEFAULT_TIMES.get(n_times, ["08:00"])
 
-            st.markdown(
-                f'<div class="alert-info">📧 {n_times} email reminder(s) will be sent daily, '
-                f'5 minutes before each scheduled time.</div>',
-                unsafe_allow_html=True
-            )
-
-            # Time inputs dynamically based on frequency
+            st.markdown(f'<div class="alert-info">📧 {n_times} email reminder(s) will be sent daily, 5 minutes before each scheduled time.</div>', unsafe_allow_html=True)
             st.markdown(f"**⏰ Set {n_times} reminder time(s):**")
-            time_cols = st.columns(n_times)
+            time_cols     = st.columns(n_times)
             reminder_times = []
             labels = ["Morning", "Afternoon", "Evening"] if n_times == 3 else \
-                    ["Morning", "Evening"] if n_times == 2 else ["Daily"]
+                     ["Morning", "Evening"] if n_times == 2 else ["Daily"]
 
             for i in range(n_times):
                 default_h, default_m = map(int, defaults[i].split(":"))
@@ -596,9 +608,8 @@ def show_app():
                 )
                 reminder_times.append(t.strftime("%H:%M"))
 
-            # Rest of the form
             with st.form("add_med"):
-                c1, c2 = st.columns(2)
+                c1, c2        = st.columns(2)
                 med_name      = c1.text_input("Medication Name *")
                 dosage        = c2.text_input("Dosage (e.g. 500mg)")
                 prescribed_by = c1.text_input("Prescribed By")
@@ -623,16 +634,13 @@ def show_app():
                                 "notes":           notes,
                             })
                             times_str = " | ".join(reminder_times)
-                            st.toast(
-                                f"✅ {med_name} added! Reminders set for {times_str}",
-                                icon="💊"
-                            )
+                            st.toast(f"✅ {med_name} added! Reminders set for {times_str}", icon="💊")
                             st.rerun()
                         except Exception as e:
                             st.error(str(e))
 
     # ══════════════════════════════════════════════════════════════════════════
-    # APPOINTMENTS
+    # APPOINTMENTS — FIXED TIMEZONE + FORM BUG
     # ══════════════════════════════════════════════════════════════════════════
     elif page == "📅 Appointments":
         st.markdown('<div class="section-header">📅 My Appointments</div>', unsafe_allow_html=True)
@@ -642,13 +650,22 @@ def show_app():
             try:
                 appts = crud.get_patient_appointments(pid)
                 if appts:
-                    upcoming = [a for a in appts if a.get("appointment_date") and a["appointment_date"] >= datetime.now() and a["status"] == "scheduled"]
-                    past     = [a for a in appts if a not in upcoming]
+                    now_ist_naive = now_ist().replace(tzinfo=None)
+
+                    upcoming = [
+                        a for a in appts
+                        if a.get("appointment_date")
+                        and a["appointment_date"] >= now_ist_naive
+                        and a["status"] == "scheduled"
+                    ]
+                    past = [a for a in appts if a not in upcoming]
 
                     if upcoming:
                         st.markdown("#### 📅 Upcoming")
                         for a in upcoming:
-                            dt = a["appointment_date"].strftime("%B %d, %Y at %H:%M") if a.get("appointment_date") else "N/A"
+                            # Display in IST
+                            dt_ist = to_ist(a["appointment_date"])
+                            dt     = dt_ist.strftime("%B %d, %Y at %I:%M %p IST") if dt_ist else "N/A"
                             with st.expander(f"📅 {dt} — Dr. {a.get('doctor_name','N/A')} ({a.get('specialty','')})"):
                                 c1, c2 = st.columns(2)
                                 c1.markdown(f"**Reason:** {a.get('reason','N/A')}")
@@ -658,16 +675,19 @@ def show_app():
                                 if b1.button("✅ Mark Completed", key=f"done_{a['id']}"):
                                     crud.update_appointment_status(a["id"], "completed")
                                     st.toast("Appointment marked as completed!", icon="✅")
+                                    clear_cache()
                                     st.rerun()
                                 if b2.button("❌ Cancel", key=f"cancel_{a['id']}"):
                                     crud.update_appointment_status(a["id"], "cancelled")
                                     st.toast("Appointment cancelled.", icon="❌")
+                                    clear_cache()
                                     st.rerun()
 
                     if past:
                         st.markdown("#### 🕐 Past")
                         for a in past[:5]:
-                            dt = a["appointment_date"].strftime("%B %d, %Y") if a.get("appointment_date") else "N/A"
+                            dt_ist = to_ist(a["appointment_date"])
+                            dt     = dt_ist.strftime("%B %d, %Y %I:%M %p IST") if dt_ist else "N/A"
                             status_color = {"completed":"#34d399","cancelled":"#f87171","no-show":"#fbbf24"}.get(a["status"],"#6b7280")
                             st.markdown(f'<div class="alert-info">📅 {dt} — Dr. {a.get("doctor_name","N/A")} &nbsp; <span style="color:{status_color}">({a["status"]})</span></div>', unsafe_allow_html=True)
                 else:
@@ -676,24 +696,29 @@ def show_app():
                 st.error(str(e))
 
         with tab2:
-            st.markdown('<div class="alert-info">📧 You will automatically receive email reminders <strong>1 day before</strong> and <strong>1 hour before</strong> your appointment.</div>', unsafe_allow_html=True)
-            
-            with st.form("schedule_appt"):
-                c1, c2 = st.columns(2)
+            st.markdown('<div class="alert-info">📧 You will automatically receive email reminders <strong>1 day before</strong> and <strong>1 hour before</strong> your appointment.<br>⏰ All times are in <strong>IST (Indian Standard Time)</strong>.</div>', unsafe_allow_html=True)
+
+            # ── Get current IST time for defaults ─────────────────────────
+            ist_now      = now_ist()
+            default_date = ist_now.date() + timedelta(days=1)
+            default_time = ist_now.replace(minute=0, second=0).time()
+
+            with st.form("schedule_appt", clear_on_submit=True):
+                c1, c2    = st.columns(2)
                 doctor    = c1.text_input("Doctor Name *")
                 specialty = c2.selectbox("Specialty", [
                     "General Medicine","Cardiology","Endocrinology","Neurology",
                     "Orthopedics","Pulmonology","Gastroenterology","Psychiatry",
                     "Dermatology","Other"
                 ])
-                appt_date = c1.date_input("Date", date.today() + timedelta(days=1))
+                appt_date = c1.date_input(
+                    "Date (IST) *",
+                    value=default_date,
+                    min_value=ist_now.date(),   # ← prevent past dates
+                )
                 appt_time = c2.time_input(
-                    "Time",
-                    value=datetime.now().replace(
-                        hour=datetime.now().hour,
-                        minute=0,
-                        second=0
-                    ).time()   # ← defaults to current hour instead of hardcoded 10am
+                    "Time (IST) *",
+                    value=default_time,          # ← defaults to current IST hour
                 )
                 reason = st.text_area("Reason for Visit", height=80)
                 notes  = st.text_area("Additional Notes", height=60)
@@ -703,26 +728,29 @@ def show_app():
                         st.error("Doctor name is required.")
                     else:
                         try:
-                            appt_datetime = datetime.combine(appt_date, appt_time)
-                            
-                            # Validate appointment is in the future
-                            if appt_datetime <= datetime.now():
-                                st.error("⚠️ Please select a future date and time.")
+                            # Combine date + time in IST then convert to UTC for storage
+                            appt_ist = datetime.combine(appt_date, appt_time).replace(tzinfo=IST)
+                            appt_utc = appt_ist.astimezone(timezone.utc).replace(tzinfo=None)
+
+                            # Validate it's in the future (IST)
+                            if appt_ist <= ist_now:
+                                st.error("⚠️ Please select a future date and time (IST).")
                             else:
                                 crud.schedule_appointment({
                                     "patient_id":       pid,
                                     "doctor_name":      doctor,
                                     "specialty":        specialty,
-                                    "appointment_date": appt_datetime,
+                                    "appointment_date": appt_utc,  # stored as UTC
                                     "reason":           reason,
                                     "notes":            notes,
                                 })
                                 st.toast(
-                                    f"✅ Appointment with Dr. {doctor} at "
-                                    f"{appt_time.strftime('%I:%M %p')} scheduled! "
-                                    f"Email reminders set.",
+                                    f"✅ Appointment with Dr. {doctor} scheduled for "
+                                    f"{appt_date.strftime('%b %d')} at "
+                                    f"{appt_time.strftime('%I:%M %p')} IST!",
                                     icon="📅"
                                 )
+                                clear_cache()
                                 st.rerun()
                         except Exception as e:
                             st.error(str(e))
@@ -795,7 +823,7 @@ def show_app():
     elif "Alerts" in page:
         st.markdown('<div class="section-header">🔔 Health Alerts</div>', unsafe_allow_html=True)
 
-        col1, col2 = st.columns([4, 1])
+        col1, col2  = st.columns([4, 1])
         show_unread = col1.checkbox("Show unread only", value=True)
         if col2.button("✅ Mark All Read"):
             crud.mark_all_alerts_read(pid)
@@ -806,10 +834,10 @@ def show_app():
             alerts = crud.get_patient_alerts(pid, unread_only=show_unread)
             if alerts:
                 for alert in alerts:
-                    sev      = alert.get("severity", "info")
-                    is_read  = alert.get("is_read", False)
-                    dt       = alert["created_at"].strftime("%b %d, %H:%M") if alert.get("created_at") else ""
-                    c1, c2   = st.columns([5, 1])
+                    sev     = alert.get("severity", "info")
+                    is_read = alert.get("is_read", False)
+                    dt      = alert["created_at"].strftime("%b %d, %H:%M") if alert.get("created_at") else ""
+                    c1, c2  = st.columns([5, 1])
                     with c1:
                         read_dot = "" if is_read else "🔴 "
                         st.markdown(f'<div class="alert-{sev}">{read_dot}<strong>{alert.get("alert_type","Alert").replace("_"," ").title()}</strong><br>{alert["message"]}<br><small style="color:#6b7280">{dt}</small></div>', unsafe_allow_html=True)
@@ -833,18 +861,18 @@ def show_app():
         with tab1:
             with st.form("edit_profile"):
                 c1, c2 = st.columns(2)
-                name      = c1.text_input("Full Name", value=patient.get("name",""))
-                email     = c2.text_input("Email", value=patient.get("email",""), disabled=True)
-                age       = c1.number_input("Age", 1, 120, int(patient.get("age", 25)))
-                gender    = c2.selectbox("Gender", ["Male","Female","Other"],
-                                         index=["Male","Female","Other"].index(patient.get("gender","Male")))
-                phone     = c1.text_input("Phone", value=patient.get("phone","") or "")
+                name        = c1.text_input("Full Name", value=patient.get("name",""))
+                email       = c2.text_input("Email", value=patient.get("email",""), disabled=True)
+                age         = c1.number_input("Age", 1, 120, int(patient.get("age", 25)))
+                gender      = c2.selectbox("Gender", ["Male","Female","Other"],
+                                           index=["Male","Female","Other"].index(patient.get("gender","Male")))
+                phone       = c1.text_input("Phone", value=patient.get("phone","") or "")
                 blood_group = c2.selectbox("Blood Group", ["A+","A-","B+","B-","AB+","AB-","O+","O-","Unknown"],
-                                            index=["A+","A-","B+","B-","AB+","AB-","O+","O-","Unknown"].index(patient.get("blood_group","Unknown")))
-                height    = c1.number_input("Height (cm)", 50.0, 250.0, float(patient.get("height") or 170.0), 0.5)
-                emergency = c2.text_input("Emergency Contact", value=patient.get("emergency_contact","") or "")
-                allergies = st.text_area("Known Allergies", value=patient.get("allergies","") or "", height=70)
-                chronic   = st.text_area("Chronic Conditions", value=patient.get("chronic_conditions","") or "", height=70)
+                                           index=["A+","A-","B+","B-","AB+","AB-","O+","O-","Unknown"].index(patient.get("blood_group","Unknown")))
+                height      = c1.number_input("Height (cm)", 50.0, 250.0, float(patient.get("height") or 170.0), 0.5)
+                emergency   = c2.text_input("Emergency Contact", value=patient.get("emergency_contact","") or "")
+                allergies   = st.text_area("Known Allergies", value=patient.get("allergies","") or "", height=70)
+                chronic     = st.text_area("Chronic Conditions", value=patient.get("chronic_conditions","") or "", height=70)
                 if st.form_submit_button("💾 Save Changes", use_container_width=True):
                     try:
                         updated = crud.update_patient(pid, {
