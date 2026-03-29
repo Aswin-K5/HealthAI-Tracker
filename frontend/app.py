@@ -677,26 +677,53 @@ def show_app():
 
         with tab2:
             st.markdown('<div class="alert-info">📧 You will automatically receive email reminders <strong>1 day before</strong> and <strong>1 hour before</strong> your appointment.</div>', unsafe_allow_html=True)
+            
             with st.form("schedule_appt"):
                 c1, c2 = st.columns(2)
                 doctor    = c1.text_input("Doctor Name *")
-                specialty = c2.selectbox("Specialty", ["General Medicine","Cardiology","Endocrinology","Neurology","Orthopedics","Pulmonology","Gastroenterology","Psychiatry","Dermatology","Other"])
+                specialty = c2.selectbox("Specialty", [
+                    "General Medicine","Cardiology","Endocrinology","Neurology",
+                    "Orthopedics","Pulmonology","Gastroenterology","Psychiatry",
+                    "Dermatology","Other"
+                ])
                 appt_date = c1.date_input("Date", date.today() + timedelta(days=1))
-                appt_time = c2.time_input("Time", datetime.now().replace(hour=10, minute=0).time())
-                reason    = st.text_area("Reason for Visit", height=80)
-                notes     = st.text_area("Additional Notes", height=60)
+                appt_time = c2.time_input(
+                    "Time",
+                    value=datetime.now().replace(
+                        hour=datetime.now().hour,
+                        minute=0,
+                        second=0
+                    ).time()   # ← defaults to current hour instead of hardcoded 10am
+                )
+                reason = st.text_area("Reason for Visit", height=80)
+                notes  = st.text_area("Additional Notes", height=60)
+
                 if st.form_submit_button("📅 Schedule Appointment", use_container_width=True):
                     if not doctor:
                         st.error("Doctor name is required.")
                     else:
                         try:
-                            crud.schedule_appointment({
-                                "patient_id": pid, "doctor_name": doctor, "specialty": specialty,
-                                "appointment_date": datetime.combine(appt_date, appt_time),
-                                "reason": reason, "notes": notes
-                            })
-                            st.toast(f"✅ Appointment with Dr. {doctor} scheduled! Email reminders set.", icon="📅")
-                            st.rerun()
+                            appt_datetime = datetime.combine(appt_date, appt_time)
+                            
+                            # Validate appointment is in the future
+                            if appt_datetime <= datetime.now():
+                                st.error("⚠️ Please select a future date and time.")
+                            else:
+                                crud.schedule_appointment({
+                                    "patient_id":       pid,
+                                    "doctor_name":      doctor,
+                                    "specialty":        specialty,
+                                    "appointment_date": appt_datetime,
+                                    "reason":           reason,
+                                    "notes":            notes,
+                                })
+                                st.toast(
+                                    f"✅ Appointment with Dr. {doctor} at "
+                                    f"{appt_time.strftime('%I:%M %p')} scheduled! "
+                                    f"Email reminders set.",
+                                    icon="📅"
+                                )
+                                st.rerun()
                         except Exception as e:
                             st.error(str(e))
 
