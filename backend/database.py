@@ -9,23 +9,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Load Streamlit Cloud secrets into environment
-try:
-    import streamlit as st
-    if hasattr(st, "secrets"):
-        for key in ["DATABASE_URL", "GROQ_API_KEY",
-                    "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD",
-                    "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS"]:
-            if key in st.secrets and not os.environ.get(key):
-                os.environ[key] = str(st.secrets[key])
-except Exception:
-    pass
-
 DATABASE_URL = os.getenv("DATABASE_URL")
+
 
 def get_connection():
     if DATABASE_URL:
-        return psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=10)
+        # Works for both direct and pooler URLs
+        return psycopg2.connect(DATABASE_URL)
     else:
         return psycopg2.connect(
             host     = os.getenv("DB_HOST", "localhost"),
@@ -33,9 +23,8 @@ def get_connection():
             database = os.getenv("DB_NAME", "postgres"),
             user     = os.getenv("DB_USER", "postgres"),
             password = os.getenv("DB_PASSWORD", ""),
-            sslmode  = "require",
-            connect_timeout = 10
         )
+
 
 @contextmanager
 def get_db():
@@ -51,26 +40,21 @@ def get_db():
 
 
 def init_db():
-    """Initialize schema and run migrations on every startup."""
-    base_dir     = os.path.dirname(__file__)
-    schema_path  = os.path.join(base_dir, "../database/schema.sql")
-    migrate_path = os.path.join(base_dir, "../database/migrate.sql")
+    base_dir    = os.path.dirname(__file__)
+    schema_path = os.path.join(base_dir, "../database/schema.sql")
 
     with get_db() as conn:
         with conn.cursor() as cur:
             with open(schema_path, "r") as f:
                 cur.execute(f.read())
-            if os.path.exists(migrate_path):
-                with open(migrate_path, "r") as f:
-                    cur.execute(f.read())
 
-    print("[DB] ✅ Schema and migrations applied.")
+    print("[DB] ✅ Schema applied.")
 
 
 def execute_query(query: str, params=None, fetch=True):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query, params)
+            cur.execute(query, params or ())
             if fetch and cur.description:
                 return [dict(row) for row in cur.fetchall()]
             return []
@@ -79,7 +63,7 @@ def execute_query(query: str, params=None, fetch=True):
 def execute_one(query: str, params=None):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query, params)
+            cur.execute(query, params or ())
             if cur.description:
                 row = cur.fetchone()
                 return dict(row) if row else None
@@ -89,7 +73,7 @@ def execute_one(query: str, params=None):
 def execute_insert(query: str, params=None):
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(query, params)
+            cur.execute(query, params or ())
             if cur.description:
                 row = cur.fetchone()
                 return dict(row) if row else None
