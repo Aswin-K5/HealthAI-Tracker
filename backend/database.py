@@ -1,5 +1,6 @@
 """
 Database configuration and connection management
+Works in both Streamlit app AND standalone scripts (GitHub Actions)
 """
 import os
 import psycopg2
@@ -14,7 +15,7 @@ try:
 except Exception:
     pass
 
-# Load Streamlit Cloud secrets into environment
+# Load Streamlit Cloud secrets into environment (only when running inside Streamlit)
 try:
     import streamlit as st
     if hasattr(st, "secrets"):
@@ -23,15 +24,17 @@ try:
                     "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS"]:
             if key in st.secrets and not os.environ.get(key):
                 os.environ[key] = str(st.secrets[key])
+    _streamlit_available = True
 except Exception:
-    pass
+    st = None
+    _streamlit_available = False
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# ── Connection Pool ───────────────────────────────────────────────────────────
+_pool = None
 
-# ── FIX 1: Connection pool — created once, reused across all queries ──────────
-@st.cache_resource
-def get_pool():
+def _create_pool():
     if DATABASE_URL:
         return psycopg2.pool.SimpleConnectionPool(
             1, 5, DATABASE_URL, connect_timeout=10
@@ -48,9 +51,27 @@ def get_pool():
         )
 
 
+def get_pool():
+    """Get connection pool — cached via st.cache_resource in Streamlit,
+    or a simple global variable in standalone scripts."""
+    global _pool
+
+    # Inside Streamlit — use cache_resource so pool persists across reruns
+    if _streamlit_available and st is not None:
+        @st.cache_resource
+        def _cached_pool():
+            return _create_pool()
+        return _cached_pool()
+
+    # Outside Streamlit (GitHub Actions, CLI scripts) — use global variable
+    if _pool is None:
+        _pool = _create_pool()
+    return _pool
+
+
 @contextmanager
 def get_db():
-    """Borrow connection from pool, return it after use instead of closing."""
+    """Borrow connection from pool, return it after use."""
     pool = get_pool()
     conn = pool.getconn()
     try:
@@ -60,16 +81,16 @@ def get_db():
         conn.rollback()
         raise
     finally:
-        pool.putconn(conn)  # return to pool, not close
+        pool.putconn(conn)
 
 
-# ── FIX 2: init_db runs only once per app session, not on every rerun ─────────
+# ── init_db runs only once per session ───────────────────────────────────────
 _db_initialized = False
 
 def init_db():
     global _db_initialized
     if _db_initialized:
-        return  # skip if already ran this session
+        return
     try:
         base_dir    = os.path.dirname(__file__)
         schema_path = os.path.join(base_dir, "../database/schema.sql")
@@ -81,7 +102,7 @@ def init_db():
     except Exception as e:
         print(f"[DB] ⚠️ Init warning: {e}")
     finally:
-        _db_initialized = True  # never retry, even on error
+        _db_initialized = True
 
 
 def execute_query(query: str, params=None, fetch=True):
