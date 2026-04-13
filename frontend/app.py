@@ -896,7 +896,7 @@ def show_app():
                     if not all([current, new_pass, confirm]):
                         st.error("Please fill all fields.")
                     elif new_pass != confirm:
-                        st.error("New passwords do not match.")
+                        st.error("New passwords does not match.")
                     elif len(new_pass) < 6:
                         st.error("Password must be at least 6 characters.")
                     else:
